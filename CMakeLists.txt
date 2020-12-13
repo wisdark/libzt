@@ -338,7 +338,9 @@ endif ()
 if (MACOS_FRAMEWORK)
 	set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DOMIT_JSON_SUPPORT=1")
 	set (CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DOMIT_JSON_SUPPORT=1")
-	include_directories ("/Library/Developer/CommandLineTools/SDKs/MacOSX10.14.sdk/usr/include/")
+	set (CMAKE_XCODE_ATTRIBUTE_ARCHS "$(ARCHS_STANDARD)")
+	set (CMAKE_XCODE_ATTRIBUTE_ONLY_ACTIVE_ARCH NO)
+	include_directories ("/Library/Developer/CommandLineTools/SDKs/MacOSX11.0.sdk/usr/include/")
 endif ()
 
 # -----------------------------------------------------------------------------
@@ -426,13 +428,14 @@ set_target_properties (ztcore PROPERTIES
 	LIBRARY_OUTPUT_DIRECTORY ${INTERMEDIATE_LIBRARY_OUTPUT_PATH})
 
 # libzt.a
-add_library (${STATIC_LIB_NAME} STATIC $<TARGET_OBJECTS:libzt_obj>
-$<TARGET_OBJECTS:zto_obj>
-$<TARGET_OBJECTS:libnatpmp_obj>
-$<TARGET_OBJECTS:miniupnpc_obj>
-$<TARGET_OBJECTS:lwip_obj> ${libztSrcGlob})
+add_library (${STATIC_LIB_NAME} STATIC $<TARGET_OBJECTS:zt_pic>
+$<TARGET_OBJECTS:zto_pic>
+$<TARGET_OBJECTS:natpmp_pic>
+$<TARGET_OBJECTS:miniupnpc_pic>
+$<TARGET_OBJECTS:lwip_pic> ${libztSrcGlob})
 set_target_properties (${STATIC_LIB_NAME} PROPERTIES
 	OUTPUT_NAME zt
+	POSITION_INDEPENDENT_CODE ON
 	LIBRARY_OUTPUT_DIRECTORY ${INTERMEDIATE_LIBRARY_OUTPUT_PATH})
 set_target_properties (${STATIC_LIB_NAME} PROPERTIES COMPILE_FLAGS "${ZT_FLAGS}")
 if (BUILDING_WIN)
@@ -481,13 +484,14 @@ if (IN_XCODE)
 	target_link_libraries( ${XCODE_FRAMEWORK_NAME} PUBLIC -fembed-bitcode )
 
 	set_target_properties(${XCODE_FRAMEWORK_NAME} PROPERTIES
-		FRAMEWORK TRUE
+		FRAMEWORK YES
 		FRAMEWORK_VERSION A
-		DEFINES_MODULE TRUE
+		XCODE_ATTRIBUTE_DEFINES_MODULE YES
 		MACOSX_FRAMEWORK_IDENTIFIER com.cmake.${XCODE_FRAMEWORK_NAME}
-		MODULE_MAP "${PROJ_DIR}/ports/module.modulemap"
+		XCODE_ATTRIBUTE_MODULEMAP_FILE "${PROJ_DIR}/ports/module.modulemap"
 		PUBLIC_HEADER "${frameworkHeaderGlob}"
 		XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "iPhone Developer"
+		XCODE_ATTRIBUTE_CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES YES
 	)
 endif ()
 

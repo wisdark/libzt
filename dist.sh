@@ -181,16 +181,42 @@ macos()
     cd $XCODE_MACOS_PROJ_DIR
     # Framework
     xcodebuild -target zt -configuration "$UPPERCASE_CONFIG" -sdk "macosx"
-    # NOTE: We build the static and dynamic editions in host()
-    # Static library (libzt.a)
-    #xcodebuild -target zt-static -configuration "$UPPERCASE_CONFIG" -sdk "macosx"
-    # Dynamic library (libzt.dylib)
-    #xcodebuild -target zt-shared -configuration "$UPPERCASE_CONFIG" -sdk "macosx"
     cd -
-    OUTPUT_DIR=$(pwd)/lib/$1/macos-$(uname -m)
+    OUTPUT_DIR=$(pwd)/lib/$1/macos-universal
     mkdir -p $OUTPUT_DIR
     rm -rf $OUTPUT_DIR/zt.framework # Remove prior to move to prevent error
     mv $XCODE_MACOS_PROJ_DIR/$UPPERCASE_CONFIG/* $OUTPUT_DIR
+}
+
+# Build xcframework
+xcframework()
+{
+    if [[ ! $OSNAME = *"darwin"* ]]; then
+        exit 0
+    fi
+    generate_projects # if needed
+    echo "Executing task: " ${FUNCNAME[ 0 ]} "(" $1 ")"
+    UPPERCASE_CONFIG="$(tr '[:lower:]' '[:upper:]' <<< ${1:0:1})${1:1}"
+    
+    OUTPUT_DIR=$(pwd)/lib/$1
+    
+    cd $XCODE_MACOS_PROJ_DIR
+    xcodebuild -target zt -configuration "$UPPERCASE_CONFIG" -sdk "macosx"
+
+    cd $XCODE_IOS_PROJ_DIR
+    xcodebuild -arch arm64 -target zt -configuration "$UPPERCASE_CONFIG" -sdk "iphoneos"
+
+    cd $XCODE_IOS_SIMULATOR_PROJ_DIR
+    xcodebuild -target zt -configuration "$UPPERCASE_CONFIG" -sdk "iphonesimulator"
+
+    mkdir -p $OUTPUT_DIR
+
+    rm -rf $OUTPUT_DIR/zt.xcframework # Remove prior to move to prevent error
+    xcodebuild -create-xcframework \
+        -framework $XCODE_MACOS_PROJ_DIR/$UPPERCASE_CONFIG/zt.framework \
+        -framework $XCODE_IOS_PROJ_DIR/$UPPERCASE_CONFIG-iphoneos/zt.framework \
+        -framework $XCODE_IOS_SIMULATOR_PROJ_DIR/$UPPERCASE_CONFIG-iphonesimulator/zt.framework \
+        -output $OUTPUT_DIR/zt.xcframework
 }
 
 # Build Java JAR for current host (uses JNI)
@@ -232,7 +258,7 @@ host_jar()
     # Build sample app classes
     # Remove old dynamic library if it exists
     rm -rf $(pwd)/examples/java/$DYNAMIC_LIB_NAME
-    javac -cp ".:"$LIB_OUTPUT_DIR/zt.jar $(pwd)/examples/java/src/main/java/*.java
+    javac -cp ".:"$LIB_OUTPUT_DIR/zt.jar $(pwd)/examples/java/src/com/zerotier/libzt/javasimpleexample/*.java
     # To run:
     # jar xf $LIB_OUTPUT_DIR/zt.jar libzt.dylib
     # cp libzt.dylib examples/java/
