@@ -1,10 +1,10 @@
 /*
- * Copyright (c)2013-2020 ZeroTier, Inc.
+ * Copyright (c)2013-2021 ZeroTier, Inc.
  *
  * Use of this software is governed by the Business Source License included
  * in the LICENSE.TXT file in the project's root directory.
  *
- * Change Date: 2024-01-01
+ * Change Date: 2026-01-01
  *
  * On the date above, in accordance with the Business Source License, use
  * of this software will be governed by version 2.0 of the Apache License.
@@ -18,989 +18,906 @@
  */
 
 #include "lwip/sockets.h"
-#include "lwip/def.h"
-#include "lwip/inet.h"
-#include "lwip/stats.h"
 
+#include "Events.hpp"
 #include "ZeroTierSockets.h"
-//#include "Events.hpp"
+#include "lwip/dns.h"
+#include "lwip/netdb.h"
 
-#define ZTS_STATE_NODE_RUNNING              0x01
-#define ZTS_STATE_STACK_RUNNING             0x02
-#define ZTS_STATE_NET_SERVICE_RUNNING       0x04
-#define ZTS_STATE_CALLBACKS_RUNNING         0x08
-#define ZTS_STATE_FREE_CALLED               0x10
-
-#ifdef SDK_JNI
-	#include <jni.h>
-#endif
-
-extern int zts_errno;
+int zts_errno;
 
 namespace ZeroTier {
-
-extern uint8_t _serviceStateFlags;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#ifdef SDK_JNI
-void ss2zta(JNIEnv *env, struct zts_sockaddr_storage *ss, jobject addr);
-void zta2ss(JNIEnv *env, struct zts_sockaddr_storage *ss, jobject addr);
-void ztfdset2fdset(JNIEnv *env, int nfds, jobject src_ztfd_set, zts_fd_set *dest_fd_set);
-void fdset2ztfdset(JNIEnv *env, int nfds, zts_fd_set *src_fd_set, jobject dest_ztfd_set);
-#endif
+int zts_bsd_socket(const int socket_family, const int socket_type, const int protocol)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_socket(socket_family, socket_type, protocol);
+}
 
-int zts_socket(const int socket_family, const int socket_type, const int protocol)
+int zts_bsd_connect(int fd, const struct zts_sockaddr* addr, zts_socklen_t addrlen)
 {
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_socket(socket_family, socket_type, protocol);
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! addr) {
+        return ZTS_ERR_ARG;
+    }
+    if (addrlen > (zts_socklen_t)sizeof(struct zts_sockaddr_storage)
+        || addrlen < (zts_socklen_t)sizeof(struct zts_sockaddr_in)) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_connect(fd, (sockaddr*)addr, addrlen);
 }
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_socket(
-	JNIEnv *env, jobject thisObj, jint family, jint type, jint protocol)
-{
-	int retval = zts_socket(family, type, protocol);
-	return retval > -1 ? retval : -(zts_errno); // Encode lwIP errno into return value for JNI functions only
-}
-#endif
 
-int zts_connect(int fd, const struct zts_sockaddr *addr, zts_socklen_t addrlen)
+int zts_bsd_bind(int fd, const struct zts_sockaddr* addr, zts_socklen_t addrlen)
 {
-	if (!addr) {
-		return ZTS_ERR_ARG;
-	}
-	if (addrlen > (int)sizeof(struct zts_sockaddr_storage) || addrlen < (int)sizeof(struct zts_sockaddr_in)) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_connect(fd, (sockaddr*)addr, addrlen);
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! addr) {
+        return ZTS_ERR_ARG;
+    }
+    if (addrlen > (int)sizeof(struct zts_sockaddr_storage) || addrlen < (int)sizeof(struct zts_sockaddr_in)) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_bind(fd, (sockaddr*)addr, addrlen);
 }
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_connect(
-	JNIEnv *env, jobject thisObj, jint fd, jobject addr)
-{
-	struct zts_sockaddr_storage ss;
-	zta2ss(env, &ss, addr);
-	socklen_t addrlen = ss.ss_family == ZTS_AF_INET ? sizeof(struct zts_sockaddr_in) : sizeof(struct zts_sockaddr_in6);
-	int retval = zts_connect(fd, (struct zts_sockaddr *)&ss, addrlen);
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
 
-int zts_bind(int fd, const struct zts_sockaddr *addr, zts_socklen_t addrlen)
+int zts_bsd_listen(int fd, int backlog)
 {
-	if (!addr) {
-		return ZTS_ERR_ARG;
-	}
-	if (addrlen > (int)sizeof(struct zts_sockaddr_storage) || addrlen < (int)sizeof(struct zts_sockaddr_in)) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_bind(fd, (sockaddr*)addr, addrlen);
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_listen(fd, backlog);
 }
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_bind(
-	JNIEnv *env, jobject thisObj, jint fd, jobject addr)
+
+int zts_bsd_accept(int fd, struct zts_sockaddr* addr, zts_socklen_t* addrlen)
 {
-	struct zts_sockaddr_storage ss;
-	zta2ss(env, &ss, addr);
-	zts_socklen_t addrlen = ss.ss_family == ZTS_AF_INET ? sizeof(struct zts_sockaddr_in) : sizeof(struct zts_sockaddr_in6);
-	int retval = zts_bind(fd, (struct zts_sockaddr*)&ss, addrlen);
-	return retval > -1 ? retval : -(zts_errno);
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_accept(fd, (sockaddr*)addr, (socklen_t*)addrlen);
 }
+
+int zts_bsd_setsockopt(int fd, int level, int optname, const void* optval, zts_socklen_t optlen)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_setsockopt(fd, level, optname, optval, optlen);
+}
+
+int zts_bsd_getsockopt(int fd, int level, int optname, void* optval, zts_socklen_t* optlen)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_getsockopt(fd, level, optname, optval, (socklen_t*)optlen);
+}
+
+int zts_bsd_getsockname(int fd, struct zts_sockaddr* addr, zts_socklen_t* addrlen)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! addr) {
+        return ZTS_ERR_ARG;
+    }
+    if (*addrlen > (int)sizeof(struct zts_sockaddr_storage) || *addrlen < (int)sizeof(struct zts_sockaddr_in)) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_getsockname(fd, (sockaddr*)addr, (socklen_t*)addrlen);
+}
+
+int zts_bsd_getpeername(int fd, struct zts_sockaddr* addr, zts_socklen_t* addrlen)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! addr) {
+        return ZTS_ERR_ARG;
+    }
+    if (*addrlen > (int)sizeof(struct zts_sockaddr_storage) || *addrlen < (int)sizeof(struct zts_sockaddr_in)) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_getpeername(fd, (sockaddr*)addr, (socklen_t*)addrlen);
+}
+
+int zts_bsd_close(int fd)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_close(fd);
+}
+
+int zts_bsd_select(
+    int nfds,
+    zts_fd_set* readfds,
+    zts_fd_set* writefds,
+    zts_fd_set* exceptfds,
+    struct zts_timeval* timeout)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_select(nfds, (fd_set*)readfds, (fd_set*)writefds, (fd_set*)exceptfds, (timeval*)timeout);
+}
+
+int zts_bsd_fcntl(int fd, int cmd, int flags)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_fcntl(fd, cmd, flags);
+}
+
+int zts_bsd_poll(struct zts_pollfd* fds, nfds_t nfds, int timeout)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_poll((pollfd*)fds, nfds, timeout);
+}
+
+int zts_bsd_ioctl(int fd, unsigned long request, void* argp)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! argp) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_ioctl(fd, request, argp);
+}
+
+ssize_t zts_bsd_send(int fd, const void* buf, size_t len, int flags)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! buf) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_send(fd, buf, len, flags);
+}
+
+ssize_t
+zts_bsd_sendto(int fd, const void* buf, size_t len, int flags, const struct zts_sockaddr* addr, zts_socklen_t addrlen)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! addr || ! buf) {
+        return ZTS_ERR_ARG;
+    }
+    if (addrlen > (int)sizeof(struct zts_sockaddr_storage) || addrlen < (int)sizeof(struct zts_sockaddr_in)) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_sendto(fd, buf, len, flags, (sockaddr*)addr, addrlen);
+}
+
+ssize_t zts_bsd_sendmsg(int fd, const struct zts_msghdr* msg, int flags)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_sendmsg(fd, (const struct msghdr*)msg, flags);
+}
+
+ssize_t zts_bsd_recv(int fd, void* buf, size_t len, int flags)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! buf) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_recv(fd, buf, len, flags);
+}
+
+ssize_t zts_bsd_recvfrom(int fd, void* buf, size_t len, int flags, struct zts_sockaddr* addr, zts_socklen_t* addrlen)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! buf) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_recvfrom(fd, buf, len, flags, (sockaddr*)addr, (socklen_t*)addrlen);
+}
+
+ssize_t zts_bsd_recvmsg(int fd, struct zts_msghdr* msg, int flags)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! msg) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_recvmsg(fd, (struct msghdr*)msg, flags);
+}
+
+ssize_t zts_bsd_read(int fd, void* buf, size_t len)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! buf) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_read(fd, buf, len);
+}
+
+ssize_t zts_bsd_readv(int fd, const struct zts_iovec* iov, int iovcnt)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_readv(fd, (iovec*)iov, iovcnt);
+}
+
+ssize_t zts_bsd_write(int fd, const void* buf, size_t len)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (! buf) {
+        return ZTS_ERR_ARG;
+    }
+    return lwip_write(fd, buf, len);
+}
+
+ssize_t zts_bsd_writev(int fd, const struct zts_iovec* iov, int iovcnt)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_writev(fd, (iovec*)iov, iovcnt);
+}
+
+int zts_bsd_shutdown(int fd, int how)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    return lwip_shutdown(fd, how);
+}
+
+struct zts_hostent* zts_bsd_gethostbyname(const char* name)
+{
+    if (! transport_ok()) {
+        return NULL;
+    }
+    if (! name) {
+        return NULL;
+    }
+    return (struct zts_hostent*)lwip_gethostbyname(name);
+}
+
+int zts_dns_set_server(uint8_t index, const zts_ip_addr* addr)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (index >= DNS_MAX_SERVERS) {
+        return ZTS_ERR_ARG;
+    }
+    if (! addr) {
+        return ZTS_ERR_ARG;
+    }
+    dns_setserver(index, (const ip_addr_t*)addr);
+    return ZTS_ERR_OK;
+}
+
+const zts_ip_addr* zts_dns_get_server(uint8_t index)
+{
+    if (! transport_ok()) {
+        return NULL;
+    }
+    if (index >= DNS_MAX_SERVERS) {
+        return NULL;
+    }
+    return (const zts_ip_addr*)dns_getserver(index);
+}
+
+char* zts_ipaddr_ntoa(const zts_ip_addr* addr)
+{
+    return ipaddr_ntoa((ip_addr_t*)addr);
+}
+
+int zts_ipaddr_aton(const char* cp, zts_ip_addr* addr)
+{
+    return ipaddr_aton(cp, (ip_addr_t*)addr);
+}
+
+const char* zts_inet_ntop(int family, const void* src, char* dst, zts_socklen_t size)
+{
+    return lwip_inet_ntop(family, src, dst, size);
+}
+
+int zts_inet_pton(int family, const char* src, void* dst)
+{
+    return lwip_inet_pton(family, src, dst);
+}
+
+int zts_util_ipstr_to_saddr(
+    const char* src_ipstr,
+    unsigned short port,
+    struct zts_sockaddr* dest_addr,
+    zts_socklen_t* addrlen)
+{
+    int family = zts_util_get_ip_family(src_ipstr);
+
+    if (family == ZTS_AF_INET) {
+        struct zts_sockaddr_in* in4 = (struct zts_sockaddr_in*)dest_addr;
+        in4->sin_port = htons(port);
+        in4->sin_family = family;
+#if defined(_WIN32)
+        zts_inet_pton(family, src_ipstr, &(in4->sin_addr.S_addr));
+#else
+        zts_inet_pton(family, src_ipstr, &(in4->sin_addr.s_addr));
 #endif
+        *addrlen = sizeof(struct zts_sockaddr_in);
+        return ZTS_ERR_OK;
+    }
+    if (family == ZTS_AF_INET6) {
+        struct zts_sockaddr_in6* in6 = (struct zts_sockaddr_in6*)dest_addr;
+        in6->sin6_port = htons(port);
+        in6->sin6_family = family;
+#if defined(_WIN32)
+        zts_inet_pton(family, src_ipstr, &(in6->sin6_addr));
+#else
+        zts_inet_pton(family, src_ipstr, &(in6->sin6_addr));
+#endif
+        *addrlen = sizeof(struct zts_sockaddr_in6);
+        return ZTS_ERR_OK;
+    }
+    return ZTS_ERR_ARG;
+}
+
+int zts_socket(int family, int type, int protocol)
+{
+    return zts_bsd_socket(family, type, protocol);
+}
+
+int zts_connect(int fd, const char* ipstr, unsigned short port, int timeout_ms)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (timeout_ms < 0) {
+        return ZTS_ERR_ARG;
+    }
+    if (timeout_ms == 0) {
+        timeout_ms = 30000;   // Default
+    }
+    int div = 4;   // Must be > 0, Four connection attempts per second
+    int n_tries = (timeout_ms / 1000) * div;
+    int connect_delay = 1000 / div;
+    int err = ZTS_ERR_SOCKET;
+
+    zts_socklen_t addrlen = 0;
+    struct zts_sockaddr_storage ss;
+    struct zts_sockaddr* sa = NULL;
+
+    // Convert to standard address structure
+
+    addrlen = sizeof(ss);
+    zts_util_ipstr_to_saddr(ipstr, port, (struct zts_sockaddr*)&ss, &addrlen);
+    sa = (struct zts_sockaddr*)&ss;
+
+    if (addrlen > 0 && sa != NULL) {
+        if (zts_get_blocking(fd)) {
+            do {
+                err = zts_bsd_connect(fd, sa, addrlen);
+                zts_util_delay(connect_delay);
+                n_tries--;
+            } while ((err < 0) && (zts_errno != 0) && (n_tries > 0));
+        }
+        return err;
+    }
+    return ZTS_ERR_ARG;
+}
+
+int zts_bind(int fd, const char* ipstr, unsigned short port)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    zts_socklen_t addrlen = 0;
+    struct zts_sockaddr_storage ss = { 0, 0, { 0 }, { 0 }, { 0 } };
+    struct zts_sockaddr* sa = NULL;
+
+    addrlen = sizeof(ss);
+    int err = ZTS_ERR_OK;
+    if ((err = zts_util_ipstr_to_saddr(ipstr, port, (struct zts_sockaddr*)&ss, &addrlen)) != ZTS_ERR_OK) {
+        return err;
+    }
+    sa = (struct zts_sockaddr*)&ss;
+    return zts_bsd_bind(fd, sa, addrlen);
+}
 
 int zts_listen(int fd, int backlog)
 {
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_listen(fd, backlog);
+    return zts_bsd_listen(fd, backlog);
 }
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_listen(
-	JNIEnv *env, jobject thisObj, jint fd, int backlog)
-{
-	int retval = zts_listen(fd, backlog);
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
 
-int zts_accept(int fd, struct zts_sockaddr *addr, zts_socklen_t *addrlen)
+int zts_accept(int fd, char* remote_addr, int len, unsigned short* port)
 {
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_accept(fd, (sockaddr*)addr, (socklen_t*)addrlen);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_accept(
-	JNIEnv *env, jobject thisObj, jint fd, jobject addr, jint port)
-{
-	struct zts_sockaddr_storage ss;
-	zts_socklen_t addrlen = sizeof(struct zts_sockaddr_storage);
-	int retval = zts_accept(fd, (zts_sockaddr*)&ss, &addrlen);
-	ss2zta(env, &ss, addr);
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (len != ZTS_INET6_ADDRSTRLEN) {
+        return ZTS_ERR_ARG;
+    }
+    zts_sockaddr_storage ss;
+    zts_socklen_t addrlen = sizeof(ss);
 
-#if defined(__linux__)
-int zts_accept4(int fd, struct zts_sockaddr *addr, zts_socklen_t *addrlen, int flags)
-{
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return ZTS_ERR_SERVICE; // TODO
+    int acc_fd = zts_bsd_accept(fd, (zts_sockaddr*)&ss, (zts_socklen_t*)&addrlen);
+    int err = ZTS_ERR_OK;
+    if ((err = zts_util_ntop((struct zts_sockaddr*)&ss, addrlen, remote_addr, len, port)) < ZTS_ERR_OK) {
+        return err;
+    }
+    return acc_fd;
 }
-#endif
-#ifdef SDK_JNI
-#if defined(__linux__)
- JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_accept4(
-	JNIEnv *env, jobject thisObj, jint fd, jobject addr, jint port, jint flags)
- {
-	struct zts_sockaddr_storage ss;
-	zts_socklen_t addrlen = sizeof(struct zts_sockaddr_storage);
-	int retval = zts_accept4(fd, (struct zts_sockaddr *)&ss, &addrlen, flags);
-	ss2zta(env, &ss, addr);
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-#endif
 
-int zts_setsockopt(int fd, int level, int optname, const void *optval,zts_socklen_t optlen)
+ssize_t zts_send(int fd, const void* buf, size_t len, int flags)
 {
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_setsockopt(fd, level, optname, optval, optlen);
+    return zts_bsd_send(fd, buf, len, flags);
 }
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_setsockopt(
-	JNIEnv *env, jobject thisObj, jint fd, jint level, jint optname, jobject optval)
+
+ssize_t zts_recv(int fd, void* buf, size_t len, int flags)
 {
-	jclass c = env->GetObjectClass(optval);
-	if (!c) {
-		return ZTS_ERR_SERVICE;
-	}
-	int optval_int = -1;
-
-	if (optname == SO_BROADCAST
-		|| optname == SO_KEEPALIVE
-		|| optname == SO_REUSEADDR
-		|| optname == SO_REUSEPORT
-		|| optname == TCP_NODELAY)
-	{
-		jfieldID fid = env->GetFieldID(c, "booleanValue", "Z");
-		optval_int = (int)(env->GetBooleanField(optval, fid));
-	}
-	if (optname == IP_TTL
-		|| optname == SO_RCVTIMEO
-		|| optname == IP_TOS
-		|| optname == SO_LINGER
-		|| optname == SO_RCVBUF
-		|| optname == SO_SNDBUF)
-	{
-		jfieldID fid = env->GetFieldID(c, "integerValue", "I");
-		optval_int = env->GetIntField(optval, fid);
-	}
-
-	int retval = ZTS_ERR_OK;
-
-	if (optname == SO_RCVTIMEO) {
-		struct timeval tv;
-		// Convert milliseconds from setSoTimeout() call to seconds and microseconds
-		tv.tv_usec = optval_int * 1000;
-		tv.tv_sec = optval_int / 1000000;
-		retval = zts_setsockopt(fd, level, optname, &tv, sizeof(tv));
-	}
-	else {
-		retval = zts_setsockopt(fd, level, optname, &optval_int, sizeof(optval_int));
-	}
-	return retval > -1 ? retval : -(zts_errno);
+    return zts_bsd_recv(fd, buf, len, flags);
 }
-#endif
 
-int zts_getsockopt(int fd, int level, int optname, void *optval, zts_socklen_t *optlen)
+ssize_t zts_read(int fd, void* buf, size_t len)
 {
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_getsockopt(fd, level, optname, optval, (socklen_t*)optlen);
+    return zts_bsd_read(fd, buf, len);
 }
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_getsockopt(
-	JNIEnv *env, jobject thisObj, jint fd, jint level, jint optname, jobject optval)
-{
-	jclass c = env->GetObjectClass(optval);
-	if (!c) {
-		return ZTS_ERR_SERVICE;
-	}
-	int optval_int = 0;
-	zts_socklen_t optlen; // Intentionally not used
 
-	int retval;
+ssize_t zts_write(int fd, const void* buf, size_t len)
+{
+    return zts_bsd_write(fd, buf, len);
+}
 
-	if (optname == SO_RCVTIMEO) {
-		struct zts_timeval tv;
-		optlen = sizeof(tv);
-		retval = zts_getsockopt(fd, level, optname, &tv, &optlen);
-		// Convert seconds and microseconds back to milliseconds
-		optval_int = (tv.tv_sec * 1000) + (tv.tv_usec / 1000);
-	}
-	else {
-		retval = zts_getsockopt(fd, level, optname, &optval_int, &optlen);
-	}
-	
-	if (optname == SO_BROADCAST
-		|| optname == SO_KEEPALIVE
-		|| optname == SO_REUSEADDR
-		|| optname == SO_REUSEPORT
-		|| optname == TCP_NODELAY)
-	{
-		jfieldID fid = env->GetFieldID(c, "isBoolean", "Z");
-		env->SetBooleanField(optval, fid, true);
-		fid = env->GetFieldID(c, "booleanValue", "Z");
-		env->SetBooleanField(optval, fid, (bool)optval_int);
-	}
-	if (optname == IP_TTL
-		|| optname == SO_RCVTIMEO
-		|| optname == IP_TOS
-		|| optname == SO_LINGER
-		|| optname == SO_RCVBUF
-		|| optname == SO_SNDBUF)
-	{
-		jfieldID fid = env->GetFieldID(c, "isInteger", "Z");
-		env->SetBooleanField(optval, fid, true);
-		fid = env->GetFieldID(c, "integerValue", "I");
-		env->SetIntField(optval, fid, optval_int);
-	}
-	return retval > -1 ? retval : -(zts_errno);
+int zts_shutdown_rd(int fd)
+{
+    return zts_bsd_shutdown(fd, ZTS_SHUT_RD);
 }
-#endif
 
-int zts_getsockname(int fd, struct zts_sockaddr *addr, zts_socklen_t *addrlen)
+int zts_shutdown_wr(int fd)
 {
-	if (!addr) {
-		return ZTS_ERR_ARG;
-	}
-	if (*addrlen > (int)sizeof(struct zts_sockaddr_storage) || *addrlen < (int)sizeof(struct zts_sockaddr_in)) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_getsockname(fd, (sockaddr*)addr, (socklen_t*)addrlen);
+    return zts_bsd_shutdown(fd, ZTS_SHUT_WR);
 }
-#ifdef SDK_JNI
-JNIEXPORT jboolean JNICALL Java_com_zerotier_libzt_ZeroTier_getsockname(JNIEnv *env, jobject thisObj,
-	jint fd, jobject addr)
-{
-	struct zts_sockaddr_storage ss;
-	zts_socklen_t addrlen = sizeof(struct zts_sockaddr_storage);
-	int retval = zts_getsockname(fd, (struct zts_sockaddr *)&ss, &addrlen);
-	ss2zta(env, &ss, addr);	 
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
 
-int zts_getpeername(int fd, struct zts_sockaddr *addr, zts_socklen_t *addrlen)
+int zts_shutdown_rdwr(int fd)
 {
-	if (!addr) {
-		return ZTS_ERR_ARG;
-	}
-	if (*addrlen > (int)sizeof(struct zts_sockaddr_storage) || *addrlen < (int)sizeof(struct zts_sockaddr_in)) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_getpeername(fd, (sockaddr*)addr, (socklen_t*)addrlen);
+    return zts_bsd_shutdown(fd, ZTS_SHUT_RDWR);
 }
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_getpeername(JNIEnv *env, jobject thisObj,
-	jint fd, jobject addr)
-{
-	struct zts_sockaddr_storage ss;
-	int retval = zts_getpeername(fd, (struct zts_sockaddr *)&ss, (zts_socklen_t*)sizeof(struct zts_sockaddr_storage));
-	ss2zta(env, &ss, addr);	 
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
 
 int zts_close(int fd)
 {
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_close(fd);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_close(
-	JNIEnv *env, jobject thisObj, jint fd)
-{
-	return zts_close(fd);
-}
-#endif
-
-int zts_select(int nfds, zts_fd_set *readfds, zts_fd_set *writefds, zts_fd_set *exceptfds,
-	struct zts_timeval *timeout)
-{
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_select(nfds, (fd_set*)readfds, (fd_set*)writefds, (fd_set*)exceptfds, (timeval*)timeout);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_select(JNIEnv *env, jobject thisObj,
-	jint nfds, jobject readfds, jobject writefds, jobject exceptfds, jint timeout_sec, jint timeout_usec)
-{
-	struct zts_timeval _timeout;
-	_timeout.tv_sec  = timeout_sec;
-	_timeout.tv_usec = timeout_usec;
-	zts_fd_set _readfds, _writefds, _exceptfds;
-	zts_fd_set *r = NULL;
-	zts_fd_set *w = NULL;
-	zts_fd_set *e = NULL;
-	if (readfds) {
-		r = &_readfds;
-		ztfdset2fdset(env, nfds, readfds, &_readfds);
-	}
-	if (writefds) {
-		w = &_writefds;
-		ztfdset2fdset(env, nfds, writefds, &_writefds);
-	}
-	if (exceptfds) {
-		e = &_exceptfds;
-		ztfdset2fdset(env, nfds, exceptfds, &_exceptfds);
-	}
-	int retval = zts_select(nfds, r, w, e, &_timeout);
-	if (readfds) {
-		fdset2ztfdset(env, nfds, &_readfds, readfds);
-	}
-	if (writefds) {
-		fdset2ztfdset(env, nfds, &_writefds, writefds);
-	}
-	if (exceptfds) {
-		fdset2ztfdset(env, nfds, &_exceptfds, exceptfds);
-	}	 
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-
-int zts_fcntl(int fd, int cmd, int flags)
-{
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_fcntl(fd, cmd, flags);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_fcntl(
-	JNIEnv *env, jobject thisObj, jint fd, jint cmd, jint flags)
-{
-	int retval = zts_fcntl(fd, cmd, flags);
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-
-// TODO: JNI version
-int zts_poll(struct zts_pollfd *fds, nfds_t nfds, int timeout)
-{
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_poll((pollfd*)fds, nfds, timeout);
+    return zts_bsd_close(fd);
 }
 
-int zts_ioctl(int fd, unsigned long request, void *argp)
+int zts_getpeername(int fd, char* remote_addr_str, int len, unsigned short* port)
 {
-	if (!argp) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_ioctl(fd, request, argp);
-}
-#ifdef SDK_JNI
-JNIEXPORT int JNICALL Java_com_zerotier_libzt_ZeroTier_ioctl(
-	JNIEnv *env, jobject thisObj, jint fd, jlong request, jobject argp)
-{
-	int retval = ZTS_ERR_OK;
-	if (request == FIONREAD) {
-		int bytesRemaining = 0;
-		retval = zts_ioctl(fd, request, &bytesRemaining);	
-		// set value in general object
-		jclass c = env->GetObjectClass(argp);
-		if (!c) {
-			return ZTS_ERR_ARG;
-		}
-		jfieldID fid = env->GetFieldID(c, "integer", "I");
-		env->SetIntField(argp, fid, bytesRemaining);
-	}
-	if (request == FIONBIO) {
-		// TODO: double check
-		int meaninglessVariable = 0;
-		retval = zts_ioctl(fd, request, &meaninglessVariable);		
-	}
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-
-ssize_t zts_send(int fd, const void *buf, size_t len, int flags)
-{
-	if (!buf || len <= 0) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_send(fd, buf, len, flags);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_send(
-	JNIEnv *env, jobject thisObj, jint fd, jbyteArray buf, int flags)
-{
-	void *data = env->GetPrimitiveArrayCritical(buf, NULL);
-	int retval = zts_send(fd, data, env->GetArrayLength(buf), flags);
-	env->ReleasePrimitiveArrayCritical(buf, data, 0);	 
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-
-ssize_t zts_sendto(int fd, const void *buf, size_t len, int flags, 
-	const struct zts_sockaddr *addr,zts_socklen_t addrlen)
-{
-	if (!addr || !buf || len <= 0) {
-		return ZTS_ERR_ARG;
-	}
-	if (addrlen > (int)sizeof(struct zts_sockaddr_storage) || addrlen < (int)sizeof(struct zts_sockaddr_in)) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_sendto(fd, buf, len, flags, (sockaddr*)addr, addrlen);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_sendto(
-	JNIEnv *env, jobject thisObj, jint fd, jbyteArray buf, jint flags, jobject addr)
-{
-	void *data = env->GetPrimitiveArrayCritical(buf, NULL);
-	struct zts_sockaddr_storage ss;
-	zta2ss(env, &ss, addr);
-	zts_socklen_t addrlen = ss.ss_family == ZTS_AF_INET ? sizeof(struct zts_sockaddr_in) : sizeof(struct zts_sockaddr_in6);
-	int retval = zts_sendto(fd, data, env->GetArrayLength(buf), flags, (struct zts_sockaddr *)&ss, addrlen);
-	env->ReleasePrimitiveArrayCritical(buf, data, 0);	 
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-
-ssize_t zts_sendmsg(int fd, const struct msghdr *msg, int flags)
-{
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_sendmsg(fd, msg, flags);
-}
-#ifdef SDK_JNI
-#endif
-
-ssize_t zts_recv(int fd, void *buf, size_t len, int flags)
-{
-	if (!buf) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_recv(fd, buf, len, flags);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_recv(JNIEnv *env, jobject thisObj,
-	jint fd, jbyteArray buf, jint flags)
-{
-	void *data = env->GetPrimitiveArrayCritical(buf, NULL);
-	int retval = zts_recv(fd, data, env->GetArrayLength(buf), flags);
-	env->ReleasePrimitiveArrayCritical(buf, data, 0);
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-
-ssize_t zts_recvfrom(int fd, void *buf, size_t len, int flags, 
-	struct zts_sockaddr *addr, zts_socklen_t *addrlen)
-{
-	if (!buf) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_recvfrom(fd, buf, len, flags, (sockaddr*)addr, (socklen_t*)addrlen);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_recvfrom(
-	JNIEnv *env, jobject thisObj, jint fd, jbyteArray buf, jint flags, jobject addr)
-{
-	zts_socklen_t addrlen = sizeof(struct zts_sockaddr_storage);
-	struct zts_sockaddr_storage ss;
-	void *data = env->GetPrimitiveArrayCritical(buf, NULL);
-	int retval = zts_recvfrom(fd, data, env->GetArrayLength(buf), flags, (struct zts_sockaddr *)&ss, &addrlen);
-	env->ReleasePrimitiveArrayCritical(buf, data, 0);
-	ss2zta(env, &ss, addr);	 
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-
-// TODO: JNI version
-ssize_t zts_recvmsg(int fd, struct msghdr *msg, int flags)
-{
-	if (!msg) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_recvmsg(fd, msg, flags);
-}
-#ifdef SDK_JNI
-#endif
-
-ssize_t zts_read(int fd, void *buf, size_t len)
-{
-	if (!buf) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_read(fd, buf, len);
-}
-ssize_t zts_read_offset(int fd, void *buf, size_t offset, size_t len)
-{
-	if (!buf) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	char *cbuf = (char*)buf;
-	return lwip_read(fd, &(cbuf[offset]), len);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_read(JNIEnv *env, jobject thisObj,
-	jint fd, jbyteArray buf)
-{
-	void *data = env->GetPrimitiveArrayCritical(buf, NULL);
-	int retval = zts_read(fd, data, env->GetArrayLength(buf));
-	env->ReleasePrimitiveArrayCritical(buf, data, 0);	 
-	return retval > -1 ? retval : -(zts_errno);
-}
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_read_1offset(JNIEnv *env, jobject thisObj,
-	jint fd, jbyteArray buf, jint offset, jint len)
-{
-	void *data = env->GetPrimitiveArrayCritical(buf, NULL);
-	int retval = zts_read_offset(fd, data, offset, len);
-	env->ReleasePrimitiveArrayCritical(buf, data, 0);	 
-	return retval > -1 ? retval : -(zts_errno);
-}
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_read_1length(JNIEnv *env, jobject thisObj,
-	jint fd, jbyteArray buf, jint len)
-{
-	void *data = env->GetPrimitiveArrayCritical(buf, NULL);
-	int retval = zts_read(fd, data, len);
-	env->ReleasePrimitiveArrayCritical(buf, data, 0);	
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-
-// TODO: JNI version
-ssize_t zts_readv(int s, const struct zts_iovec *iov, int iovcnt)
-{
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_readv(s, (iovec*)iov, iovcnt);
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (len != ZTS_INET6_ADDRSTRLEN) {
+        return ZTS_ERR_ARG;
+    }
+    struct zts_sockaddr_storage ss;
+    struct zts_sockaddr* sa = (struct zts_sockaddr*)&ss;
+    int err = ZTS_ERR_OK;
+    zts_socklen_t addrlen = sizeof(ss);
+    if ((err = zts_bsd_getpeername(fd, sa, &addrlen)) < 0) {
+        return err;
+    }
+    return zts_util_ntop(sa, addrlen, remote_addr_str, len, port);
 }
 
-ssize_t zts_write(int fd, const void *buf, size_t len)
+int zts_getsockname(int fd, char* local_addr_str, int len, unsigned short* port)
 {
-	if (!buf || len <= 0) {
-		return ZTS_ERR_ARG;
-	}
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_write(fd, buf, len);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_write__IB(JNIEnv *env, jobject thisObj,
-	jint fd, jbyteArray buf)
-{
-	void *data = env->GetPrimitiveArrayCritical(buf, NULL);
-	int retval = zts_write(fd, data, env->GetArrayLength(buf));
-	env->ReleasePrimitiveArrayCritical(buf, data, 0);	 
-	return retval > -1 ? retval : -(zts_errno);
-}
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_write_1offset(JNIEnv *env, jobject thisObj,
-	jint fd, jbyteArray buf, jint offset, jint len)
-{
-	void *data = env->GetPrimitiveArrayCritical(&(buf[offset]), NULL); // PENDING: check?
-	int retval = zts_write(fd, data, len);
-	env->ReleasePrimitiveArrayCritical(buf, data, 0);	
-	return retval > -1 ? retval : -(zts_errno);
-}
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_write_1byte(JNIEnv *env, jobject thisObj,
-	jint fd, jbyte buf)
-{
-	int retval = zts_write(fd, &buf, 1);
-	return retval > -1 ? retval : -(zts_errno);
-}
-#endif
-
-// TODO: JNI version
-ssize_t zts_writev(int fd, const struct zts_iovec *iov, int iovcnt)
-{
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_writev(fd, (iovec*)iov, iovcnt);
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (len != ZTS_INET6_ADDRSTRLEN) {
+        return ZTS_ERR_ARG;
+    }
+    struct zts_sockaddr_storage ss;
+    struct zts_sockaddr* sa = (struct zts_sockaddr*)&ss;
+    int err = ZTS_ERR_OK;
+    zts_socklen_t addrlen = sizeof(ss);
+    if ((err = zts_bsd_getsockname(fd, sa, &addrlen)) < 0) {
+        return err;
+    }
+    return zts_util_ntop(sa, addrlen, local_addr_str, len, port);
 }
 
-int zts_shutdown(int fd, int how)
+int zts_tcp_client(const char* remote_ipstr, unsigned short remote_port)
 {
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return lwip_shutdown(fd, how);
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_shutdown(
-	JNIEnv *env, jobject thisObj, int fd, int how)
-{
-	return zts_shutdown(fd, how);
-}
-#endif
-
-int zts_add_dns_nameserver(struct zts_sockaddr *addr)
-{
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return ZTS_ERR_SERVICE; // TODO
-}
-#ifdef SDK_JNI
-#endif
-
-int zts_del_dns_nameserver(struct zts_sockaddr *addr)
-{
-	if (!(_serviceStateFlags & ZTS_STATE_NET_SERVICE_RUNNING)) {
-		return ZTS_ERR_SERVICE;
-	}
-	return ZTS_ERR_SERVICE; // TODO
-}
-#ifdef SDK_JNI
-#endif
-
-uint16_t zts_htons(uint16_t n)
-{
-	return lwip_htons(n);
+    int fd, family = zts_util_get_ip_family(remote_ipstr);
+    if ((fd = zts_bsd_socket(family, ZTS_SOCK_STREAM, 0)) < 0) {
+        return fd;   // Failed to create socket
+    }
+    int timeout = 0;
+    if ((fd = zts_connect(fd, remote_ipstr, remote_port, timeout)) < 0) {
+        zts_bsd_close(fd);
+        return fd;   // Failed to connect
+    }
+    return fd;
 }
 
-uint32_t zts_htonl(uint32_t n)
+int zts_tcp_server(
+    const char* local_ipstr,
+    unsigned short local_port,
+    char* remote_ipstr,
+    int len,
+    unsigned short* remote_port)
 {
-	return lwip_htonl(n);
+    int listen_fd, family = zts_util_get_ip_family(local_ipstr);
+    if ((listen_fd = zts_bsd_socket(family, ZTS_SOCK_STREAM, 0)) < 0) {
+        return listen_fd;   // Failed to create socket
+    }
+    if ((listen_fd = zts_bind(listen_fd, local_ipstr, local_port)) < 0) {
+        return listen_fd;   // Failed to bind
+    }
+    int backlog = 0;
+    if ((listen_fd = zts_bsd_listen(listen_fd, backlog)) < 0) {
+        return listen_fd;   // Failed to listen
+    }
+    int acc_fd = 0;
+    if ((acc_fd = zts_accept(listen_fd, remote_ipstr, len, remote_port)) < 0) {
+        return acc_fd;   // Failed to accept
+    }
+    zts_bsd_close(listen_fd);
+    return acc_fd;
 }
 
-uint16_t zts_ntohs(uint16_t n)
+int zts_udp_server(const char* local_ipstr, unsigned short local_port)
 {
-	return lwip_htons(n);
+    int fd, family = zts_util_get_ip_family(local_ipstr);
+    if ((fd = zts_bsd_socket(family, ZTS_SOCK_DGRAM, 0)) < 0) {
+        return fd;   // Failed to create socket
+    }
+    if ((fd = zts_bind(fd, local_ipstr, local_port)) < 0) {
+        zts_bsd_close(fd);
+        return fd;   // Failed to connect
+    }
+    return fd;
 }
 
-uint32_t zts_ntohl(uint32_t n)
+int zts_udp_client(const char* remote_ipstr)
 {
-	return lwip_htonl(n);
+    int fd, family = zts_util_get_ip_family(remote_ipstr);
+    if ((fd = zts_bsd_socket(family, ZTS_SOCK_DGRAM, 0)) < 0) {
+        return fd;   // Failed to create socket
+    }
+    return fd;
 }
 
-const char *zts_inet_ntop(int af, const void *src, char *dst,zts_socklen_t size)
+int zts_set_no_delay(int fd, int enabled)
 {
-	return lwip_inet_ntop(af,src,dst,size);
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (enabled != 0 && enabled != 1) {
+        return ZTS_ERR_ARG;
+    }
+    return zts_bsd_setsockopt(fd, ZTS_IPPROTO_TCP, ZTS_TCP_NODELAY, (void*)&enabled, sizeof(int));
 }
 
-int zts_inet_pton(int af, const char *src, void *dst)
+int zts_get_no_delay(int fd)
 {
-	return lwip_inet_pton(af,src,dst);
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    int err, optval = 0;
+    zts_socklen_t len = sizeof(optval);
+    if ((err = zts_bsd_getsockopt(fd, ZTS_IPPROTO_TCP, ZTS_TCP_NODELAY, (void*)&optval, &len)) < 0) {
+        return err;
+    }
+    return optval != 0;
 }
 
-uint32_t zts_inet_addr(const char *cp)
+int zts_set_linger(int fd, int enabled, int value)
 {
-	return ipaddr_addr(cp);
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (enabled != 0 && enabled != 1) {
+        return ZTS_ERR_ARG;
+    }
+    if (value < 0) {
+        return ZTS_ERR_ARG;
+    }
+    struct zts_linger linger;
+    linger.l_onoff = enabled;
+    linger.l_linger = value;
+    return zts_bsd_setsockopt(fd, ZTS_SOL_SOCKET, ZTS_SO_LINGER, (void*)&linger, sizeof(linger));
 }
 
-//////////////////////////////////////////////////////////////////////////////
-// Statistics                                                               //
-//////////////////////////////////////////////////////////////////////////////
-
-extern struct stats_ lwip_stats;
-
-int zts_get_all_stats(struct zts_stats *statsDest)
+int zts_get_linger_enabled(int fd)
 {
-#if LWIP_STATS
-	if (!statsDest) {
-		return ZTS_ERR_ARG;
-	}
-	memset(statsDest, 0, sizeof(struct zts_stats));
-	// Copy lwIP stats
-	memcpy(&(statsDest->link), &(lwip_stats.link), sizeof(struct stats_proto));
-	memcpy(&(statsDest->etharp), &(lwip_stats.etharp), sizeof(struct stats_proto));
-	memcpy(&(statsDest->ip_frag), &(lwip_stats.ip_frag), sizeof(struct stats_proto));
-	memcpy(&(statsDest->ip), &(lwip_stats.ip), sizeof(struct stats_proto));
-	memcpy(&(statsDest->icmp), &(lwip_stats.icmp), sizeof(struct stats_proto));
-	//memcpy(&(statsDest->igmp), &(lwip_stats.igmp), sizeof(struct stats_igmp));
-	memcpy(&(statsDest->udp), &(lwip_stats.udp), sizeof(struct stats_proto));
-	memcpy(&(statsDest->tcp), &(lwip_stats.tcp), sizeof(struct stats_proto));
-	// mem omitted
-	// memp omitted
-	memcpy(&(statsDest->sys), &(lwip_stats.sys), sizeof(struct stats_sys));
-	memcpy(&(statsDest->ip6), &(lwip_stats.ip6), sizeof(struct stats_proto));
-	memcpy(&(statsDest->icmp6), &(lwip_stats.icmp6), sizeof(struct stats_proto));
-	memcpy(&(statsDest->ip6_frag), &(lwip_stats.ip6_frag), sizeof(struct stats_proto));
-	memcpy(&(statsDest->mld6), &(lwip_stats.mld6), sizeof(struct stats_igmp));
-	memcpy(&(statsDest->nd6), &(lwip_stats.nd6), sizeof(struct stats_proto));
-	memcpy(&(statsDest->ip_frag), &(lwip_stats.ip_frag), sizeof(struct stats_proto));
-	// mib2 omitted
-	// Copy ZT stats
-	// ...
-	return ZTS_ERR_OK;
-#else
-	return ZTS_ERR_NO_RESULT;
-#endif
-}
-#ifdef SDK_JNI
-	// No implementation for JNI
-#endif
-
-int zts_get_protocol_stats(int protocolType, void *protoStatsDest)
-{
-#if LWIP_STATS
-	if (!protoStatsDest) {
-		return ZTS_ERR_ARG;
-	}
-	memset(protoStatsDest, 0, sizeof(struct stats_proto));
-	switch (protocolType)
-	{
-		case ZTS_STATS_PROTOCOL_LINK:
-			memcpy(protoStatsDest, &(lwip_stats.link), sizeof(struct stats_proto));
-			break;
-		case ZTS_STATS_PROTOCOL_ETHARP:
-			memcpy(protoStatsDest, &(lwip_stats.etharp), sizeof(struct stats_proto));
-			break;
-		case ZTS_STATS_PROTOCOL_IP:
-			memcpy(protoStatsDest, &(lwip_stats.ip), sizeof(struct stats_proto));
-			break;
-		case ZTS_STATS_PROTOCOL_UDP:
-			memcpy(protoStatsDest, &(lwip_stats.udp), sizeof(struct stats_proto));
-			break;
-		case ZTS_STATS_PROTOCOL_TCP:
-			memcpy(protoStatsDest, &(lwip_stats.tcp), sizeof(struct stats_proto));
-			break;
-		case ZTS_STATS_PROTOCOL_ICMP:
-			memcpy(protoStatsDest, &(lwip_stats.icmp), sizeof(struct stats_proto));
-			break;
-		case ZTS_STATS_PROTOCOL_IP_FRAG:
-			memcpy(protoStatsDest, &(lwip_stats.ip_frag), sizeof(struct stats_proto));
-			break;
-		case ZTS_STATS_PROTOCOL_IP6:
-			memcpy(protoStatsDest, &(lwip_stats.ip6), sizeof(struct stats_proto));
-			break;
-		case ZTS_STATS_PROTOCOL_ICMP6:
-			memcpy(protoStatsDest, &(lwip_stats.icmp6), sizeof(struct stats_proto));
-			break;
-		case ZTS_STATS_PROTOCOL_IP6_FRAG:
-			memcpy(protoStatsDest, &(lwip_stats.ip6_frag), sizeof(struct stats_proto));
-			break;
-		default:
-			return ZTS_ERR_ARG;
-	}
-	return ZTS_ERR_OK;
-#else
-	return ZTS_ERR_NO_RESULT;
-#endif
-}
-#ifdef SDK_JNI
-JNIEXPORT jint JNICALL Java_com_zerotier_libzt_ZeroTier_get_1protocol_1stats(
-	JNIEnv *env, jobject thisObj, jint protocolType, jobject protoStatsObj)
-{
-	struct stats_proto stats;
-	int retval = zts_get_protocol_stats(protocolType, &stats);
-	// Copy stats into Java object
-	jclass c = env->GetObjectClass(protoStatsObj);
-	if (!c) {
-		return ZTS_ERR_ARG;
-	}
-	jfieldID fid;
-	fid = env->GetFieldID(c, "xmit", "I");
-	env->SetIntField(protoStatsObj, fid, stats.xmit);
-	fid = env->GetFieldID(c, "recv", "I");
-	env->SetIntField(protoStatsObj, fid, stats.recv);
-	fid = env->GetFieldID(c, "fw", "I");
-	env->SetIntField(protoStatsObj, fid, stats.fw);
-	fid = env->GetFieldID(c, "drop", "I");
-	env->SetIntField(protoStatsObj, fid, stats.drop);
-	fid = env->GetFieldID(c, "chkerr", "I");
-	env->SetIntField(protoStatsObj, fid, stats.chkerr);
-	fid = env->GetFieldID(c, "lenerr", "I");
-	env->SetIntField(protoStatsObj, fid, stats.lenerr);
-	fid = env->GetFieldID(c, "memerr", "I");
-	env->SetIntField(protoStatsObj, fid, stats.memerr);
-	fid = env->GetFieldID(c, "rterr", "I");
-	env->SetIntField(protoStatsObj, fid, stats.rterr);
-	fid = env->GetFieldID(c, "proterr", "I");
-	env->SetIntField(protoStatsObj, fid, stats.proterr);
-	fid = env->GetFieldID(c, "opterr", "I");
-	env->SetIntField(protoStatsObj, fid, stats.opterr);
-	fid = env->GetFieldID(c, "err", "I");
-	env->SetIntField(protoStatsObj, fid, stats.err);
-	fid = env->GetFieldID(c, "cachehit", "I");
-	env->SetIntField(protoStatsObj, fid, stats.cachehit);
-	return retval;
-}
-#endif
-
-#ifdef SDK_JNI
-void ztfdset2fdset(JNIEnv *env, int nfds, jobject src_ztfd_set, zts_fd_set *dest_fd_set)
-{
-	jclass c = env->GetObjectClass(src_ztfd_set);
-	if (!c) {
-		return;
-	}
-	ZTS_FD_ZERO(dest_fd_set);
-	jfieldID fid = env->GetFieldID(c, "fds_bits", "[B");
-	jobject fdData = env->GetObjectField (src_ztfd_set, fid);
-	jbyteArray * arr = reinterpret_cast<jbyteArray*>(&fdData);
-	char *data = (char*)env->GetByteArrayElements(*arr, NULL);
-	for (int i=0; i<nfds; i++) {
-		if (data[i] == 0x01)  {
-			ZTS_FD_SET(i, dest_fd_set);
-		}
-	}
-	env->ReleaseByteArrayElements(*arr, (jbyte*)data, 0);
-	return;
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    struct zts_linger linger;
+    zts_socklen_t len = sizeof(linger);
+    int err;
+    if ((err = zts_bsd_getsockopt(fd, ZTS_SOL_SOCKET, ZTS_SO_LINGER, (void*)&linger, &len)) < 0) {
+        return err;
+    }
+    return linger.l_onoff;
 }
 
-void fdset2ztfdset(JNIEnv *env, int nfds, zts_fd_set *src_fd_set, jobject dest_ztfd_set)
+int zts_get_linger_value(int fd)
 {
-	jclass c = env->GetObjectClass(dest_ztfd_set);
-	if (!c) {
-		return;
-	}
-	jfieldID fid = env->GetFieldID(c, "fds_bits", "[B");
-	jobject fdData = env->GetObjectField (dest_ztfd_set, fid);
-	jbyteArray * arr = reinterpret_cast<jbyteArray*>(&fdData);
-	char *data = (char*)env->GetByteArrayElements(*arr, NULL);
-	for (int i=0; i<nfds; i++) {
-		if (ZTS_FD_ISSET(i, src_fd_set)) {
-			data[i] = 0x01;
-		}
-	}
-	env->ReleaseByteArrayElements(*arr, (jbyte*)data, 0);
-	return;
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    struct zts_linger linger;
+    zts_socklen_t len = sizeof(linger);
+    int err;
+    if ((err = zts_bsd_getsockopt(fd, ZTS_SOL_SOCKET, ZTS_SO_LINGER, (void*)&linger, &len)) < 0) {
+        return err;
+    }
+    return linger.l_linger;
 }
 
-//////////////////////////////////////////////////////////////////////////////
-// Helpers (for moving data across the JNI barrier)                         //
-//////////////////////////////////////////////////////////////////////////////
-
-void ss2zta(JNIEnv *env, struct zts_sockaddr_storage *ss, jobject addr)
+int zts_get_pending_data_size(int fd)
 {
-	jclass c = env->GetObjectClass(addr);
-	if (!c) {
-		return;
-	}
-	if(ss->ss_family == ZTS_AF_INET)
-	{
-		struct zts_sockaddr_in *in4 = (struct zts_sockaddr_in*)ss;
-		jfieldID fid = env->GetFieldID(c, "_port", "I");
-		env->SetIntField(addr, fid, lwip_ntohs(in4->sin_port));
-		fid = env->GetFieldID(c,"_family", "I");
-		env->SetIntField(addr, fid, (in4->sin_family));
-		fid = env->GetFieldID(c, "_ip4", "[B");
-		jobject ipData = env->GetObjectField (addr, fid);
-		jbyteArray * arr = reinterpret_cast<jbyteArray*>(&ipData);
-		char *data = (char*)env->GetByteArrayElements(*arr, NULL);
-		memcpy(data, &(in4->sin_addr.s_addr), 4);
-		env->ReleaseByteArrayElements(*arr, (jbyte*)data, 0);
-
-		return;
-	}
-	if(ss->ss_family == ZTS_AF_INET6)
-	{
-		struct zts_sockaddr_in6 *in6 = (struct zts_sockaddr_in6*)ss;
-		jfieldID fid = env->GetFieldID(c, "_port", "I");
-		env->SetIntField(addr, fid, lwip_ntohs(in6->sin6_port));
-		fid = env->GetFieldID(c,"_family", "I");
-		env->SetIntField(addr, fid, (in6->sin6_family));
-		fid = env->GetFieldID(c, "_ip6", "[B");
-		jobject ipData = env->GetObjectField (addr, fid);
-		jbyteArray * arr = reinterpret_cast<jbyteArray*>(&ipData);
-		char *data = (char*)env->GetByteArrayElements(*arr, NULL);
-		memcpy(data, &(in6->sin6_addr.s6_addr), 16);
-		env->ReleaseByteArrayElements(*arr, (jbyte*)data, 0);
-		return;
-	}
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    int bytes_available = 0;
+    int err = ZTS_ERR_OK;
+    if ((err = zts_bsd_ioctl(fd, ZTS_FIONREAD, &bytes_available)) < 0) {
+        return err;
+    }
+    return bytes_available;
 }
 
-void zta2ss(JNIEnv *env, struct zts_sockaddr_storage *ss, jobject addr)
+int zts_set_reuse_addr(int fd, int enabled)
 {
-	jclass c = env->GetObjectClass(addr);
-	if (!c) {
-		return;
-	}
-	jfieldID fid = env->GetFieldID(c, "_family", "I");
-	int family = env->GetIntField(addr, fid);
-	if (family == ZTS_AF_INET)
-	{
-		struct zts_sockaddr_in *in4 = (struct zts_sockaddr_in*)ss;
-		fid = env->GetFieldID(c, "_port", "I");
-		in4->sin_port = lwip_htons(env->GetIntField(addr, fid));
-		in4->sin_family = ZTS_AF_INET;
-		fid = env->GetFieldID(c, "_ip4", "[B");
-		jobject ipData = env->GetObjectField (addr, fid);
-		jbyteArray * arr = reinterpret_cast<jbyteArray*>(&ipData);
-		char *data = (char*)env->GetByteArrayElements(*arr, NULL);
-		memcpy(&(in4->sin_addr.s_addr), data, 4);
-		env->ReleaseByteArrayElements(*arr, (jbyte*)data, 0);
-		return;
-	}
-	if (family == ZTS_AF_INET6)
-	{
-		struct zts_sockaddr_in6 *in6 = (struct zts_sockaddr_in6*)ss;
-		jfieldID fid = env->GetFieldID(c, "_port", "I");
-		in6->sin6_port = lwip_htons(env->GetIntField(addr, fid));
-		fid = env->GetFieldID(c,"_family", "I");
-		in6->sin6_family = ZTS_AF_INET6;
-		fid = env->GetFieldID(c, "_ip6", "[B");
-		jobject ipData = env->GetObjectField (addr, fid);
-		jbyteArray * arr = reinterpret_cast<jbyteArray*>(&ipData);
-		char *data = (char*)env->GetByteArrayElements(*arr, NULL);
-		memcpy(&(in6->sin6_addr.s6_addr), data, 16);
-		env->ReleaseByteArrayElements(*arr, (jbyte*)data, 0);
-		return;
-	}
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (enabled != 0 && enabled != 1) {
+        return ZTS_ERR_ARG;
+    }
+    return zts_bsd_setsockopt(fd, ZTS_SOL_SOCKET, ZTS_SO_REUSEADDR, (void*)&enabled, sizeof(enabled));
 }
-#endif // JNI
+
+int zts_get_reuse_addr(int fd)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    int err, optval = 0;
+    zts_socklen_t optlen = sizeof(optval);
+    if ((err = zts_bsd_getsockopt(fd, ZTS_SOL_SOCKET, ZTS_SO_REUSEADDR, (void*)&optval, &optlen)) < 0) {
+        return err;
+    }
+    return optval != 0;
+}
+
+int zts_set_recv_timeout(int fd, int seconds, int microseconds)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (seconds < 0 || microseconds < 0) {
+        return ZTS_ERR_ARG;
+    }
+    struct timeval tv;
+    tv.tv_sec = seconds;
+    tv.tv_usec = microseconds;
+    return zts_bsd_setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (void*)&tv, sizeof(tv));
+}
+
+int zts_get_recv_timeout(int fd)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    struct timeval tv;
+    zts_socklen_t optlen = sizeof(tv);
+    int err;
+    if ((err = zts_bsd_getsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (void*)&tv, &optlen)) < 0) {
+        return err;
+    }
+    return tv.tv_sec;   // TODO microseconds
+}
+
+int zts_set_send_timeout(int fd, int seconds, int microseconds)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (seconds < 0 || microseconds < 0) {
+        return ZTS_ERR_ARG;
+    }
+    struct timeval tv;
+    tv.tv_sec = seconds;
+    tv.tv_usec = microseconds;
+    return zts_bsd_setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (void*)&tv, sizeof(tv));
+}
+
+int zts_get_send_timeout(int fd)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    struct zts_timeval tv;
+    zts_socklen_t optlen = sizeof(tv);
+    int err;
+    if ((err = zts_bsd_getsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (void*)&tv, &optlen)) < 0) {
+        return err;
+    }
+    return tv.tv_sec;   // TODO microseconds
+}
+
+int zts_set_send_buf_size(int fd, int size)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (size < 0) {
+        return ZTS_ERR_ARG;
+    }
+    return zts_bsd_setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (void*)&size, sizeof(int));
+}
+
+int zts_get_send_buf_size(int fd)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    int err, optval = 0;
+    zts_socklen_t optlen = sizeof(optval);
+    if ((err = zts_bsd_getsockopt(fd, SOL_SOCKET, SO_SNDBUF, (char*)&optval, &optlen)) < 0) {
+        return err;
+    }
+    return optval;
+}
+
+int zts_set_recv_buf_size(int fd, int size)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (size < 0) {
+        return ZTS_ERR_ARG;
+    }
+    return zts_bsd_setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (void*)&size, sizeof(int));
+}
+
+int zts_get_recv_buf_size(int fd)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    int err, optval = 0;
+    zts_socklen_t optlen = sizeof(optval);
+    if ((err = zts_bsd_getsockopt(fd, SOL_SOCKET, SO_RCVBUF, (char*)&optval, &optlen)) < 0) {
+        return err;
+    }
+    return optval;
+}
+
+int zts_set_ttl(int fd, int ttl)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (ttl < 0 || ttl > 255) {
+        return ZTS_ERR_ARG;
+    }
+    return zts_bsd_setsockopt(fd, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl));
+}
+
+int zts_get_ttl(int fd)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    int err, ttl = 0;
+    zts_socklen_t optlen = sizeof(ttl);
+    if ((err = zts_bsd_getsockopt(fd, IPPROTO_IP, IP_TTL, &ttl, &optlen)) < 0) {
+        return err;
+    }
+    return ttl;
+}
+
+int zts_set_blocking(int fd, int enabled)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (enabled != 0 && enabled != 1) {
+        return ZTS_ERR_ARG;
+    }
+    int flags = zts_bsd_fcntl(fd, ZTS_F_GETFL, 0);
+    if (! enabled) {
+        return zts_bsd_fcntl(fd, ZTS_F_SETFL, flags | ZTS_O_NONBLOCK);
+    }
+    else {
+        // Default
+        return zts_bsd_fcntl(fd, ZTS_F_SETFL, flags & (~ZTS_O_NONBLOCK));
+    }
+}
+
+int zts_get_blocking(int fd)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    int flags = zts_bsd_fcntl(fd, ZTS_F_GETFL, 0);
+    if (flags < 0) {
+        return flags;
+    }
+    return ! (flags & ZTS_O_NONBLOCK);
+}
+
+int zts_set_keepalive(int fd, int enabled)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    if (enabled != 0 && enabled != 1) {
+        return ZTS_ERR_ARG;
+    }
+    int keepalive = enabled;
+    return zts_bsd_setsockopt(fd, ZTS_SOL_SOCKET, ZTS_SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+}
+
+int zts_get_keepalive(int fd)
+{
+    if (! transport_ok()) {
+        return ZTS_ERR_SERVICE;
+    }
+    int err, optval = 0;
+    zts_socklen_t optlen = sizeof(optval);
+    if ((err = zts_bsd_getsockopt(fd, ZTS_SOL_SOCKET, ZTS_SO_KEEPALIVE, (void*)&optval, &optlen)) < 0) {
+        return err;
+    }
+    return optval != 0;
+}
+
+int zts_util_ntop(struct zts_sockaddr* addr, zts_socklen_t addrlen, char* dst_str, int len, unsigned short* port)
+{
+    if (! addr || addrlen < sizeof(struct zts_sockaddr_in) || addrlen > sizeof(struct zts_sockaddr_storage) || ! dst_str
+        || len != ZTS_INET6_ADDRSTRLEN) {
+        return ZTS_ERR_ARG;
+    }
+    if (addr->sa_family == ZTS_AF_INET) {
+        struct zts_sockaddr_in* in4 = (struct zts_sockaddr_in*)addr;
+        zts_inet_ntop(ZTS_AF_INET, &(in4->sin_addr), dst_str, len);
+        *port = ntohs(in4->sin_port);
+        return ZTS_ERR_OK;
+    }
+    if (addr->sa_family == ZTS_AF_INET6) {
+        struct zts_sockaddr_in6* in6 = (struct zts_sockaddr_in6*)addr;
+        zts_inet_ntop(ZTS_AF_INET6, &(in6->sin6_addr), dst_str, len);
+        *port = ntohs(in6->sin6_port);
+        return ZTS_ERR_OK;
+    }
+    return ZTS_ERR_ARG;
+}
 
 #ifdef __cplusplus
 }
 #endif
 
-} // namespace ZeroTier
+}   // namespace ZeroTier
